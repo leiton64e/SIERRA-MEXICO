@@ -1,0 +1,248 @@
+local Players, RunService, UIS = game:GetService("Players"), game:GetService("RunService"), game:GetService("UserInputService")
+local LP = Players.LocalPlayer; while not LP do task.wait(); LP = Players.LocalPlayer end
+local Cam = workspace.CurrentCamera or workspace:WaitForChild("Camera")
+local GuiParent = (pcall(function() return game:GetService("CoreGui") end) and game:GetService("CoreGui")) or LP:WaitForChild("PlayerGui")
+local IS_MOB = UIS.TouchEnabled and not UIS.KeyboardEnabled
+
+local CFG = {
+	Aim = true, ESP = true, XRay = true, Sticky = true, FOV = IS_MOB and 130 or 170, Smooth = 0.55,
+	MaxDist = 1500, CheckWall = true, NoSpawn = true, MaxHL = 16, ESPInt = 0.125,
+	Allies = {
+		ejercito = { ejercito = 1, policia = 1, marina = 1, ["fuerzas especiales"] = 1 },
+		policia = { ejercito = 1, policia = 1, marina = 1, ["fuerzas especiales"] = 1 },
+		marina = { ejercito = 1, policia = 1, marina = 1, ["fuerzas especiales"] = 1 },
+		cartel = { cartel = 1, sicarios = 1, banda = 1 }, sicarios = { cartel = 1, sicarios = 1, banda = 1 },
+	},
+}
+
+local SAFE_NAMES = { safezone=1, zonasegura=1, spawnzone=1, lobby=1, carga=1 }
+local function norm(s) return string.lower((s or ""):gsub("^%s*(.-)%s*$", "%1")) end
+
+local safeZones = {}
+local function addZone(v) if v:IsA("BasePart") and SAFE_NAMES[norm(v.Name)] then safeZones[v] = true end end
+for _, v in ipairs(workspace:GetDescendants()) do addZone(v) end
+workspace.DescendantAdded:Connect(addZone)
+workspace.DescendantRemoving:Connect(function(v) safeZones[v] = nil end)
+
+local function inSafe(pos)
+	for z in pairs(safeZones) do
+		if z.Parent then
+			local r, h = z.CFrame:PointToObjectSpace(pos), z.Size * 0.5
+			if math.abs(r.X) <= h.X and math.abs(r.Y) <= h.Y and math.abs(r.Z) <= h.Z then return true end
+		else safeZones[z] = nil end
+	end
+	return false
+end
+
+local allyMap = {}
+local function rebuildAllies()
+	table.clear(allyMap)
+	local t1 = LP.Team; local n1 = t1 and norm(t1.Name)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p == LP then allyMap[p] = true; continue end
+		local t2 = p.Team; local ok = false
+		if t1 and t2 then
+			local n2 = norm(t2.Name)
+			ok = (t1 == t2) or (n1 == n2) or (t1.TeamColor == t2.TeamColor)
+				or (CFG.Allies[n1] and CFG.Allies[n1][n2] ~= nil) or (CFG.Allies[n2] and CFG.Allies[n2][n1] ~= nil)
+		elseif LP.TeamColor == p.TeamColor then ok = true end
+		allyMap[p] = ok
+	end
+end
+local function watchTeam(p) p:GetPropertyChangedSignal("Team"):Connect(rebuildAllies); p:GetPropertyChangedSignal("TeamColor"):Connect(rebuildAllies) end
+for _, p in ipairs(Players:GetPlayers()) do watchTeam(p) end
+Players.PlayerAdded:Connect(function(p) watchTeam(p); rebuildAllies() end)
+Players.PlayerRemoving:Connect(function(p) allyMap[p] = nil end)
+rebuildAllies()
+
+local function getEnemy(p)
+	if allyMap[p] then return nil end
+	local c = p.Character; if not c or not c.Parent then return nil end
+	local hum, root, head = c:FindFirstChildOfClass("Humanoid"), c:FindFirstChild("HumanoidRootPart"), c:FindFirstChild("Head")
+	if not hum or not root or not head or hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead then return nil end
+	if CFG.NoSpawn and (c:FindFirstChildOfClass("ForceField") or inSafe(root.Position)) then return nil end
+	return c, hum, root, head
+end
+
+local rayP = RaycastParams.new(); rayP.FilterType = Enum.RaycastFilterType.Exclude; rayP.IgnoreWater = true
+local baseEx = {}
+local function refreshBaseEx()
+	table.clear(baseEx); table.insert(baseEx, Cam)
+	if LP.Character then table.insert(baseEx, LP.Character) end
+	for p, isA in pairs(allyMap) do if isA and p.Character then table.insert(baseEx, p.Character) end end
+end
+
+local function clearLOS(head, char)
+	if not CFG.CheckWall then return true end
+	local orig = Cam.CFrame.Position; local diff = head.Position - orig; local dist = diff.Magnitude
+	if dist < 0.1 then return true end
+	refreshBaseEx(); rayP.FilterDescendantsInstances = baseEx
+	local dir, cur, rem = diff.Unit, orig, dist
+	for _ = 1, 3 do
+		local res = workspace:Raycast(cur, dir * rem, rayP)
+		if not res or res.Instance:IsDescendantOf(char) then return true end
+		if (not res.Instance.CanCollide) and res.Instance.Transparency >= 0.85 then
+			table.insert(baseEx, res.Instance); rayP.FilterDescendantsInstances = baseEx
+			local step = (res.Position - cur).Magnitude + 0.05; rem -= step
+			if rem < 0.1 then return true end
+			cur = res.Position + dir * 0.05
+		else return false end
+	end
+	return false
+end
+
+pcall(function() GuiParent.SierraCompactHUD:Destroy() end)
+local gui = Instance.new("ScreenGui"); gui.Name = "SierraCompactHUD"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true; gui.Parent = GuiParent
+
+local fovCircle = Instance.new("Frame"); fovCircle.AnchorPoint = Vector2.new(0.5,0.5); fovCircle.Position = UDim2.fromScale(0.5,0.5)
+fovCircle.Size = UDim2.fromOffset(CFG.FOV*2, CFG.FOV*2); fovCircle.BackgroundTransparency = 1; fovCircle.Parent = gui
+Instance.new("UICorner", fovCircle).CornerRadius = UDim.new(1,0)
+local fovStroke = Instance.new("UIStroke"); fovStroke.Thickness = 1.5; fovStroke.Transparency = 0.3; fovStroke.Color = Color3.new(1,1,1); fovStroke.Parent = fovCircle
+
+local w, h = IS_MOB and 196 or 220, IS_MOB and 104 or 100
+local box = Instance.new("Frame"); box.Size = UDim2.fromOffset(w, h)
+box.Position = IS_MOB and UDim2.new(0.5, -w/2, 0, 8) or UDim2.fromOffset(16, 60)
+box.BackgroundColor3 = Color3.fromRGB(16,18,24); box.BackgroundTransparency = 0.15; box.BorderSizePixel = 0; box.Parent = gui
+Instance.new("UICorner", box).CornerRadius = UDim.new(0,8)
+
+local top = Instance.new("TextLabel"); top.Size = UDim2.new(1,-28,0,22); top.Position = UDim2.fromOffset(8,0)
+top.BackgroundTransparency = 1; top.TextXAlignment = Enum.TextXAlignment.Left; top.Font = Enum.Font.GothamBold
+top.TextSize = 11; top.TextColor3 = Color3.new(1,1,1); top.Text = "SIERRA HUD (Mover)"; top.Active = true; top.Parent = box
+
+local mini = Instance.new("TextButton"); mini.Size = UDim2.fromOffset(20,18); mini.Position = UDim2.new(1,-24,0,2)
+mini.BackgroundColor3 = Color3.fromRGB(45,50,65); mini.Text = "-"; mini.TextColor3 = Color3.new(1,1,1); mini.Font = Enum.Font.GothamBold; mini.Parent = box
+Instance.new("UICorner", mini).CornerRadius = UDim.new(0,5)
+
+local body = Instance.new("Frame"); body.Size = UDim2.new(1,-10,1,-24); body.Position = UDim2.fromOffset(5,22); body.BackgroundTransparency = 1; body.Parent = box
+local info = Instance.new("TextLabel"); info.Size = UDim2.new(1,0,0,28); info.BackgroundTransparency = 1; info.TextXAlignment = Enum.TextXAlignment.Left
+info.Font = Enum.Font.Gotham; info.TextSize = 11; info.TextColor3 = Color3.fromRGB(235,235,235); info.Parent = body
+
+local function mkBtn(txt, x, y, bw, bh, col)
+	local b = Instance.new("TextButton"); b.Size = UDim2.fromOffset(bw, bh); b.Position = UDim2.fromOffset(x, y)
+	b.BackgroundColor3 = col; b.Text = txt; b.TextColor3 = Color3.new(1,1,1); b.Font = Enum.Font.GothamBold; b.TextSize = 11; b.Parent = body
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0,5); return b
+end
+
+local bw = (w - 16) / 2; local bh = IS_MOB and 26 or 23
+local bAim = mkBtn("", 0, 30, bw, bh, Color3.fromRGB(40,145,80))
+local bEsp = mkBtn("", bw + 6, 30, bw, bh, Color3.fromRGB(40,110,175))
+local bFovM = mkBtn("FOV -", 0, 34 + bh, bw, 18, Color3.fromRGB(50,55,70))
+local bFovP = mkBtn("FOV +", bw + 6, 34 + bh, bw, 18, Color3.fromRGB(50,55,70))
+
+local dragInp, dStart, pStart, isMin = nil, Vector2.zero, Vector2.zero, false
+top.InputBegan:Connect(function(i)
+	if not dragInp and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+		dragInp, dStart, pStart = i, Vector2.new(i.Position.X, i.Position.Y), Vector2.new(box.Position.X.Offset, box.Position.Y.Offset)
+	end
+end)
+UIS.InputChanged:Connect(function(i)
+	if i == dragInp and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+		local d = Vector2.new(i.Position.X, i.Position.Y) - dStart
+		box.Position = UDim2.fromOffset(math.clamp(pStart.X+d.X, 0, math.max(0, Cam.ViewportSize.X-box.AbsoluteSize.X)), math.clamp(pStart.Y+d.Y, 0, math.max(0, Cam.ViewportSize.Y-box.AbsoluteSize.Y)))
+	end
+end)
+UIS.InputEnded:Connect(function(i) if i == dragInp then dragInp = nil end end)
+
+local function syncUI()
+	bAim.Text = "AIM: " .. (CFG.Aim and "ON" or "OFF"); bAim.BackgroundColor3 = CFG.Aim and Color3.fromRGB(40,145,80) or Color3.fromRGB(130,45,45)
+	bEsp.Text = "ESP: " .. (CFG.ESP and "ON" or "OFF"); bEsp.BackgroundColor3 = CFG.ESP and Color3.fromRGB(40,110,175) or Color3.fromRGB(70,75,88)
+	fovCircle.Visible = CFG.Aim; fovCircle.Size = UDim2.fromOffset(CFG.FOV*2, CFG.FOV*2)
+end
+mini.MouseButton1Click:Connect(function() isMin = not isMin; body.Visible = not isMin; mini.Text = isMin and "+" or "-"; box.Size = UDim2.fromOffset(w, isMin and 22 or h) end)
+bAim.MouseButton1Click:Connect(function() CFG.Aim = not CFG.Aim; syncUI() end)
+bEsp.MouseButton1Click:Connect(function() CFG.ESP = not CFG.ESP; syncUI() end)
+bFovM.MouseButton1Click:Connect(function() CFG.FOV = math.clamp(CFG.FOV - 20, 50, 400); syncUI() end)
+bFovP.MouseButton1Click:Connect(function() CFG.FOV = math.clamp(CFG.FOV + 20, 50, 400); syncUI() end)
+UIS.InputBegan:Connect(function(i, gp) if gp then return end; if i.KeyCode == Enum.KeyCode.E then CFG.Aim = not CFG.Aim; syncUI() elseif i.KeyCode == Enum.KeyCode.T then CFG.ESP = not CFG.ESP; syncUI() end end)
+syncUI()
+
+local espCache, list = {}, {}
+local function dropESP(p) local e = espCache[p]; if e then if e.dc then e.dc:Disconnect() end; e.bb:Destroy(); if e.hl then e.hl:Destroy() end; espCache[p] = nil end end
+Players.PlayerRemoving:Connect(dropESP)
+
+local function stepESP()
+	if not CFG.ESP then for p in pairs(espCache) do dropESP(p) end; return end
+	local myR = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+	local orig = myR and myR.Position or Cam.CFrame.Position
+	table.clear(list)
+	for _, p in ipairs(Players:GetPlayers()) do
+		local c, hum, root = getEnemy(p)
+		if not c then dropESP(p); continue end
+		local d = (root.Position - orig).Magnitude
+		if d > CFG.MaxDist then dropESP(p); continue end
+		table.insert(list, { p=p, c=c, hum=hum, root=root, d=d })
+	end
+	table.sort(list, function(a,b) return a.d < b.d end)
+	for idx, it in ipairs(list) do
+		local e = espCache[it.p]
+		if not e then
+			local bb = Instance.new("BillboardGui"); bb.Adornee = it.root; bb.Size = UDim2.fromOffset(180,36); bb.StudsOffset = Vector3.new(0,2.7,0); bb.AlwaysOnTop = true; bb.Parent = GuiParent
+			local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.fromScale(1,1); lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 12; lbl.TextColor3 = Color3.fromRGB(255,65,65); lbl.TextStrokeTransparency = 0.2; lbl.Parent = bb
+			e = { bb=bb, lbl=lbl, dc = it.hum.Died:Connect(function() dropESP(it.p) end) }; espCache[it.p] = e
+		elseif e.bb.Adornee ~= it.root then e.bb.Adornee = it.root end
+		if CFG.XRay and idx <= CFG.MaxHL then
+			if not e.hl then local hl = Instance.new("Highlight"); hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; hl.FillColor = Color3.fromRGB(255,65,65); hl.OutlineColor = Color3.fromRGB(255,65,65); hl.FillTransparency = 0.65; hl.OutlineTransparency = 0.1; hl.Parent = GuiParent; e.hl = hl end
+			if e.hl.Adornee ~= it.c then e.hl.Adornee = it.c end
+		elseif e.hl then e.hl:Destroy(); e.hl = nil end
+		local txt = string.format("%s | %dHP | %dm", it.p.Name, math.floor(it.hum.Health), math.floor(it.d))
+		if e.lbl.Text ~= txt then e.lbl.Text = txt end
+	end
+end
+
+local lockedPlr: Player? = nil
+local function validSticky(p, cx, cy, holdSq, camPos)
+	if not p or not p.Parent then return nil end
+	local c, _, _, head = getEnemy(p); if not c then return nil end
+	local d = (head.Position - camPos).Magnitude; if d > CFG.MaxDist then return nil end
+	local sp, vis = Cam:WorldToViewportPoint(head.Position); if not vis or sp.Z <= 0 then return nil end
+	local dx, dy = sp.X - cx, sp.Y - cy
+	if (dx*dx + dy*dy) > holdSq then return nil end
+	if not clearLOS(head, c) then return nil end
+	return head
+end
+
+local acc, lastInfo, lastLock = 0, "", nil
+RunService:BindToRenderStep("SierraLoop", Enum.RenderPriority.Camera.Value + 1, function(dt)
+	Cam = workspace.CurrentCamera or Cam; if not Cam then return end
+	acc += dt; if acc >= CFG.ESPInt then acc = 0; stepESP() end
+
+	local locked, blocked = nil, false
+	if CFG.Aim then
+		local vp = Cam.ViewportSize; local cx, cy = vp.X*0.5, vp.Y*0.5; local fovSq = CFG.FOV * CFG.FOV
+		local holdR = CFG.FOV * 1.45; local holdSq = holdR * holdR
+		local camPos = Cam.CFrame.Position; local bestH, bestP = nil, nil
+
+		if CFG.Sticky and lockedPlr then
+			local sh = validSticky(lockedPlr, cx, cy, holdSq, camPos)
+			if sh then bestH, bestP = sh, lockedPlr else lockedPlr = nil end
+		end
+
+		if not bestH then
+			local bestS = math.huge
+			for _, p in ipairs(Players:GetPlayers()) do
+				local c, _, _, head = getEnemy(p); if not c then continue end
+				local d = (head.Position - camPos).Magnitude; if d > CFG.MaxDist then continue end
+				local sp, vis = Cam:WorldToViewportPoint(head.Position); if not vis or sp.Z <= 0 then continue end
+				local dx, dy = sp.X - cx, sp.Y - cy; local dSq = dx*dx + dy*dy; if dSq > fovSq then continue end
+				if not clearLOS(head, c) then blocked = true; continue end
+				local sc = math.sqrt(dSq) + d*0.05; if sc < bestS then bestS, bestH, bestP = sc, head, p end
+			end
+			if CFG.Sticky and bestP then lockedPlr = bestP end
+		end
+
+		if bestH and bestP then
+			locked = bestP.Name
+			local cur = Cam.CFrame; local goal = CFrame.lookAt(cur.Position, bestH.Position)
+			Cam.CFrame = cur.LookVector:Angle(goal.LookVector) < 0.0026 and goal or cur:Lerp(goal, math.clamp(CFG.Smooth, 0.05, 1))
+		end
+	else
+		lockedPlr = nil
+	end
+
+	if locked ~= lastLock then
+		lastLock = locked
+		fovStroke.Color = locked and Color3.fromRGB(255,65,65) or Color3.new(1,1,1)
+	end
+	local txt = "Eq: " .. (LP.Team and LP.Team.Name or "-") .. " | Tgt: " .. (locked or (blocked and "Muro" or "Ninguno"))
+	if txt ~= lastInfo then lastInfo = txt; info.Text = txt end
+end)
